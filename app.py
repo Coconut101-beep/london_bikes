@@ -1,9 +1,8 @@
-"""London bikes dashboard: explore daily hires, predict, and compare models."""
+"""London bikes dashboard: explore daily hires and predict with M4."""
 
 from __future__ import annotations
 
 import os
-import re
 from pathlib import Path
 
 import numpy as np
@@ -24,7 +23,6 @@ COEF_PATH = ROOT / "model_coefficients.csv"
 DAY_ORDER = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 SEASON_ORDER = ["Winter", "Spring", "Summer", "Autumn"]
 SET2 = px.colors.qualitative.Set2
-PALETTE = {"A": "#2e86ab", "B": "#e09f3e", "dashboard": "#1b365d"}
 
 WEATHER_OPTIONS = [
     {"label": "Temperature (°C)", "value": "temp"},
@@ -46,22 +44,6 @@ COLOUR_OPTIONS = [
     {"label": "Weekend", "value": "weekend"},
     {"label": "Season", "value": "season_name"},
 ]
-
-MODEL_LABELS = {
-    "M1_temp": "M1 · Temp only",
-    "M2_weekday": "M2 · Weekday + extras",
-    "M3_weather": "M3 · Core weather",
-    "M4_season": "M4 · Season + daylight",
-}
-FIT_ROWS = {
-    "R-squared": "r2",
-    "R-squared Adj.": "r2_adj_rounded",
-    "AIC": "aic",
-    "Adj R2": "adj_r2",
-    "N": "n",
-    "Residual SE": "residual_se",
-}
-COEF_FOCUS = ["temp", "precip", "humidity", "windspeed", "visibility"]
 
 EMPTY_FIG = go.Figure()
 EMPTY_FIG.update_layout(
@@ -138,49 +120,20 @@ def equation_card(icon, title, badge, equation, note):
 MODEL_EQUATIONS = html.Div(
     [
         html.H2(
-            [fa("square-root-variable"), " The three models"],
+            "M4 · Season + daylight",
             className="section-title",
         ),
-        html.Div(
-            [
-                equation_card(
-                    "rocket",
-                    "Dashboard model",
-                    "Used on Predict",
-                    (
-                        "Intercept + 562.36 × temperature + (−183.65) × precipitation + "
-                        "105.53 × visibility + (−149.15) × wind speed + (−39.73) × precip cover + "
-                        "80.89 × sea-level pressure + 886.21 × UV index + 335.62 × daylight + "
-                        "a weekday effect + a season effect + a post-2023 shift"
-                    ),
-                    "Intercept = −64,093. Monday and Autumn are the baselines. post_2023 = −4,788 from 2023 onward.",
-                ),
-                equation_card(
-                    "layer-group",
-                    "Table A · M4 Season + daylight",
-                    "model_coff2 · adj. R² 0.67",
-                    (
-                        "Intercept + 879.1 × temperature + (−182.0) × precipitation + "
-                        "(−158.1) × wind speed + 99.0 × visibility + 78.6 × sea-level pressure + "
-                        "(−38.3) × precip cover + (−282.2) × feels-like min + 769.6 × UV index + "
-                        "389.6 × daylight + a season effect + a post-2023 shift + a weekday effect"
-                    ),
-                    "Intercept = −63,329. Autumn is the season baseline; Monday is the weekday baseline.",
-                ),
-                equation_card(
-                    "layer-group",
-                    "Table B · M2 Weekday + extras",
-                    "model_coff3 · adj. R² 0.69",
-                    (
-                        "Intercept + 589.4 × temperature + (−211.8) × precipitation + "
-                        "(−107.8) × humidity + (−192.2) × wind speed + (−10.7) × cloud cover + "
-                        "40.8 × solar radiation + 54.0 × visibility + a year effect + "
-                        "a month effect + a weekday effect"
-                    ),
-                    "Intercept = 27,283. Strongest in-sample fit of the three (lowest AIC). Monday is the weekday baseline. Years after 2025 use the 2025 effect.",
-                ),
-            ],
-            className="equation-grid",
+        equation_card(
+            "rocket",
+            "M4 model",
+            "model_coefficients.csv",
+            (
+                "Intercept + 562.36 × temperature + (−183.65) × precipitation + "
+                "105.53 × visibility + (−149.15) × wind speed + (−39.73) × precip cover + "
+                "80.89 × sea-level pressure + 886.21 × UV index + 335.62 × daylight + "
+                "a weekday effect + a season effect + a post-2023 shift"
+            ),
+            "Intercept = −64,093. Monday and Autumn are the baselines. post_2023 = −4,788 from 2023 onward.",
         ),
     ],
     className="equations",
@@ -192,26 +145,6 @@ def _weekend_label(value) -> str:
     if value is True or text in {"TRUE", "1", "WEEKEND"}:
         return "Weekend"
     return "Weekday"
-
-
-def parse_num(value):
-    if value is None or (isinstance(value, float) and np.isnan(value)):
-        return np.nan
-    text = (
-        str(value)
-        .replace(",", "")
-        .replace("*", "")
-        .replace("(", "")
-        .replace(")", "")
-        .replace('"', "")
-        .strip()
-    )
-    if text == "" or text.lower() == "nan":
-        return np.nan
-    try:
-        return float(text)
-    except ValueError:
-        return np.nan
 
 
 def load_bikes():
@@ -263,35 +196,6 @@ def load_coefficients():
     return intercept, numeric_coefs, day_coefs
 
 
-def parse_model_table(path: Path, source_id: str, source_label: str):
-    """Turn a wide nested-model CSV into fit-stats and coefficient frames."""
-    raw = pd.read_csv(path)
-    model_ids = [c for c in raw.columns if c in MODEL_LABELS]
-    fit_rows = []
-    coef_rows = []
-    for model_id in model_ids:
-        stats = {"source": source_id, "source_label": source_label, "model": model_id}
-        for _, row in raw.iterrows():
-            term = str(row["term"]).strip()
-            value = parse_num(row[model_id])
-            if term in FIT_ROWS:
-                stats[FIT_ROWS[term]] = value
-            elif term and not term.startswith("R-") and pd.notna(value):
-                coef_rows.append(
-                    {
-                        "source": source_id,
-                        "source_label": source_label,
-                        "model": model_id,
-                        "model_label": MODEL_LABELS[model_id],
-                        "term": term,
-                        "coefficient": value,
-                    }
-                )
-        stats["model_label"] = MODEL_LABELS[model_id]
-        fit_rows.append(stats)
-    return pd.DataFrame(fit_rows), pd.DataFrame(coef_rows)
-
-
 def predict_hires(weather: pd.DataFrame, intercept, numeric_coefs, day_coefs):
     """Apply Intercept + numeric terms + day-of-week coefficient."""
     predicted = []
@@ -311,15 +215,7 @@ def predict_hires(weather: pd.DataFrame, intercept, numeric_coefs, day_coefs):
     return out
 
 
-DAY_TERM = re.compile(r"^C\(day_of_week\)\[T\.(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\]$")
-MONTH_TERM = re.compile(r"^C\(month\)\[T\.(\d+)\]$")
-MONTH_NAME_TERM = re.compile(r"^C\(month_name\)\[T\.([A-Za-z]+)\]$")
-YEAR_TERM = re.compile(r"^C\(year\)\[T\.(\d{4})\]$")
-SEASON_TERM = re.compile(r"^C\(season_name\)\[T\.(Winter|Spring|Summer|Autumn)\]$")
-SQUARED_TERM = re.compile(r"^I\((\w+) \*\* 2\)$")
-
 TRAINING_MEANS = {
-    "solarradiation": 109.9,
     "visibility": 22.8,
     "sealevelpressure": 1015.0,
     "uvindex": 4.2,
@@ -369,107 +265,6 @@ def enrich_calendar(weather: pd.DataFrame) -> pd.DataFrame:
         else:
             out[col] = pd.to_numeric(out[col], errors="coerce").fillna(mean)
     return out
-
-
-def apply_pat_model(weather: pd.DataFrame, coefs: dict, year_fallback: int | None = 2025):
-    """Score a statsmodels-style formula (C(day), C(month), C(year), I(x**2))."""
-    dummy_years = {int(m.group(1)) for term in coefs if (m := YEAR_TERM.match(term))}
-    intercept = float(coefs.get("Intercept", 0.0))
-    predicted = []
-    for _, row in weather.iterrows():
-        yhat = intercept
-        year = int(row.get("year", 0) or 0)
-        if dummy_years and year not in dummy_years:
-            year = year_fallback if year_fallback in dummy_years else max(dummy_years)
-        for term, coef in coefs.items():
-            if term == "Intercept" or pd.isna(coef):
-                continue
-            match = DAY_TERM.match(term)
-            if match:
-                if str(row.get("day_of_week")) == match.group(1):
-                    yhat += coef
-                continue
-            match = MONTH_TERM.match(term)
-            if match:
-                if int(row.get("month", 0) or 0) == int(match.group(1)):
-                    yhat += coef
-                continue
-            match = MONTH_NAME_TERM.match(term)
-            if match:
-                if str(row.get("month_name")) == match.group(1):
-                    yhat += coef
-                continue
-            match = YEAR_TERM.match(term)
-            if match:
-                if year == int(match.group(1)):
-                    yhat += coef
-                continue
-            match = SEASON_TERM.match(term)
-            if match:
-                if str(row.get("season_name")) == match.group(1):
-                    yhat += coef
-                continue
-            if term == "C(post_2023)[T.True]":
-                if int(row.get("year", 0) or 0) >= 2023:
-                    yhat += coef
-                continue
-            match = SQUARED_TERM.match(term)
-            if match:
-                value = row.get(match.group(1), 0.0)
-                yhat += coef * float(0.0 if pd.isna(value) else value) ** 2
-                continue
-            value = row.get(term)
-            if pd.isna(value):
-                value = TRAINING_MEANS.get(term, 0.0)
-            yhat += coef * float(value)
-        predicted.append(yhat)
-    out = weather.copy()
-    out["predicted_hires"] = predicted
-    return out
-
-
-def dashboard_in_sample(bike, intercept, numeric_coefs, day_coefs):
-    """In-sample R² / RMSE for the deployed dashboard model (2014+)."""
-    df = bike.copy()
-    if "date" in df.columns:
-        df = df[df["date"] >= pd.Timestamp("2014-01-01", tz="UTC")]
-    if "month" in df.columns:
-        df["month"] = pd.to_numeric(df["month"], errors="coerce")
-    df = add_model_dummies(df)
-    dummy_or_id = [
-        c
-        for c in numeric_coefs
-        if c.startswith("season_") or c == "post_2023"
-    ]
-    needed = [
-        "bikes_hired",
-        "day_of_week",
-        *[c for c in numeric_coefs if c not in dummy_or_id],
-    ]
-    df = df.dropna(subset=[c for c in needed if c in df.columns])
-    if df.empty:
-        return None
-    yhat = np.full(len(df), intercept, dtype=float)
-    for term, coef in numeric_coefs.items():
-        yhat += coef * df[term].astype(float).to_numpy()
-    day_map = {key.replace("day_", ""): val for key, val in day_coefs.items()}
-    yhat += df["day_of_week"].astype(str).map(day_map).fillna(0).to_numpy()
-    y = df["bikes_hired"].astype(float).to_numpy()
-    ss_res = np.sum((y - yhat) ** 2)
-    ss_tot = np.sum((y - y.mean()) ** 2)
-    r2 = 1 - ss_res / ss_tot if ss_tot else np.nan
-    rmse = float(np.sqrt(np.mean((y - yhat) ** 2)))
-    return {
-        "source": "dashboard",
-        "source_label": "Dashboard model",
-        "model": "dashboard",
-        "model_label": "Deployed (season + daylight)",
-        "r2": r2,
-        "adj_r2": r2,
-        "aic": np.nan,
-        "n": float(len(df)),
-        "residual_se": rmse,
-    }
 
 
 def fetch_weather(kind: str):
@@ -604,32 +399,6 @@ except Exception as exc:
     INTERCEPT, NUMERIC_COEFS, DAY_COEFS = 0.0, {}, {}
     COEF_ERROR = f"Could not load model_coefficients.csv: {exc}"
 
-try:
-    FIT_A, COEF_A = parse_model_table(
-        ROOT / "model_coff2.csv", "A", "Table A · model_coff2"
-    )
-    FIT_B, COEF_B = parse_model_table(
-        ROOT / "model_coff3.csv", "B", "Table B · model_coff3"
-    )
-    FIT_ALL = pd.concat([FIT_A, FIT_B], ignore_index=True)
-    COEF_ALL = pd.concat([COEF_A, COEF_B], ignore_index=True)
-    COMPARE_ERROR = None
-except Exception as exc:
-    FIT_ALL, COEF_ALL = pd.DataFrame(), pd.DataFrame()
-    COMPARE_ERROR = f"Could not load the comparison tables: {exc}"
-
-M2_COEFS = {}
-if not COEF_ALL.empty:
-    m2 = COEF_ALL[(COEF_ALL["source"] == "B") & (COEF_ALL["model"] == "M2_weekday")]
-    M2_COEFS = dict(zip(m2["term"], m2["coefficient"]))
-M2_ERROR = None if M2_COEFS else "Could not load Table B M2 coefficients."
-
-DASHBOARD_FIT = (
-    dashboard_in_sample(BIKES, INTERCEPT, NUMERIC_COEFS, DAY_COEFS)
-    if not BIKES.empty and not COEF_ERROR
-    else None
-)
-
 YEAR_MIN = int(BIKES["year"].min()) if not BIKES.empty and "year" in BIKES.columns else 2010
 YEAR_MAX = int(BIKES["year"].max()) if not BIKES.empty and "year" in BIKES.columns else 2026
 
@@ -646,18 +415,14 @@ def get_weather(kind: str):
     return _WEATHER_CACHE[kind]
 
 
-def weather_predictions(kind: str, model: str = "dashboard"):
+def weather_predictions(kind: str):
     """Return (predictions_df, error_message) for history or forecast."""
     weather, error = get_weather(kind)
     if error:
         return pd.DataFrame(), error
-    if model == "dashboard":
-        if COEF_ERROR:
-            return pd.DataFrame(), COEF_ERROR
-        return predict_hires(weather, INTERCEPT, NUMERIC_COEFS, DAY_COEFS), None
-    if M2_ERROR:
-        return pd.DataFrame(), M2_ERROR
-    return apply_pat_model(weather, M2_COEFS), None
+    if COEF_ERROR:
+        return pd.DataFrame(), COEF_ERROR
+    return predict_hires(weather, INTERCEPT, NUMERIC_COEFS, DAY_COEFS), None
 
 
 app = Dash(__name__)
@@ -671,8 +436,7 @@ app.layout = html.Div(
                 html.H1([fa("bicycle", "hero-icon"), " London Bike Hires"]),
                 html.P(
                     "Explore how weather and the day of week shape daily Santander "
-                    "Cycle hires, predict with the deployed linear model, and compare "
-                    "two alternative nested-model specifications."
+                    "Cycle hires, then predict with the M4 season-and-daylight model."
                 ),
             ],
             className="hero",
@@ -856,34 +620,12 @@ app.layout = html.Div(
                             html.P(
                                 [
                                     fa("wand-magic-sparkles"),
-                                    " Predictions default to the exported dashboard model in "
+                                    " Predictions use the M4 season-and-daylight model in "
                                     "`model_coefficients.csv` (weather, daylight, UV, season, "
                                     "weekday, and a post-2023 shift). Open-Meteo supplies the "
-                                    "weather inputs. Table B’s M2 remains available below.",
+                                    "weather inputs.",
                                 ],
                                 className="lede",
-                            ),
-                            html.Div(
-                                [
-                                    html.Label([fa("calculator"), " Prediction model"]),
-                                    dcc.RadioItems(
-                                        id="predict-model",
-                                        options=[
-                                            {
-                                                "label": " Dashboard model (season + daylight)",
-                                                "value": "dashboard",
-                                            },
-                                            {
-                                                "label": " Table B · M2 (weekday + extras)",
-                                                "value": "m2",
-                                            },
-                                        ],
-                                        value="dashboard",
-                                        inline=True,
-                                        className="radio-row",
-                                    ),
-                                ],
-                                className="card card--controls",
                             ),
                             html.Div(id="predict-banner"),
                             html.Div(
@@ -910,53 +652,6 @@ app.layout = html.Div(
                                 ],
                                 className="card",
                             ),
-                        ],
-                        className="panel",
-                    ),
-                ),
-                dcc.Tab(
-                    label="Compare models",
-                    value="compare",
-                    className="tab",
-                    selected_className="tab--selected",
-                    children=html.Div(
-                        [
-                            html.P(
-                                [
-                                    fa("scale-balanced"),
-                                    " Table A (`model_coff2.csv`) and Table B "
-                                    "(`model_coff3.csv`) are two nested-model ladders. "
-                                    "M1 is temperature only; M3 adds core weather and "
-                                    "weekdays; M2 and M4 add calendar structure "
-                                    "(months/years vs seasons and daylight). The "
-                                    "deployed dashboard model is shown as a reference "
-                                    "using in-sample fit on 2014+ data.",
-                                ],
-                                className="lede",
-                            ),
-                            html.Div(
-                                [
-                                    html.Label([fa("layer-group"), " Show"]),
-                                    dcc.RadioItems(
-                                        id="compare-source",
-                                        options=[
-                                            {"label": " Table A", "value": "A"},
-                                            {"label": " Table B", "value": "B"},
-                                            {"label": " Both tables", "value": "both"},
-                                        ],
-                                        value="both",
-                                        inline=True,
-                                        className="radio-row",
-                                    ),
-                                ],
-                                className="card card--controls",
-                            ),
-                            html.Div(id="compare-kpis", className="kpi-grid"),
-                            html.Div(id="compare-note", className="compare-note"),
-                            dcc.Graph(id="compare-fit-fig"),
-                            dcc.Graph(id="compare-aic-fig"),
-                            dcc.Graph(id="compare-coef-fig"),
-                            html.Div(id="compare-table"),
                         ],
                         className="panel",
                     ),
@@ -1157,17 +852,13 @@ def update_point_detail(click_data, weather_var):
     Output("forecast-table", "children"),
     Output("forecast-bar", "figure"),
     Input("tabs", "value"),
-    Input("predict-model", "value"),
 )
-def update_predict(_tab, model):
-    model = model or "dashboard"
-    history_preds, history_error = weather_predictions("history", model)
-    forecast_preds, forecast_error = weather_predictions("forecast", model)
+def update_predict(_tab):
+    history_preds, history_error = weather_predictions("history")
+    forecast_preds, forecast_error = weather_predictions("forecast")
 
     messages = []
-    if model == "m2" and M2_ERROR:
-        messages.append(M2_ERROR)
-    if model == "dashboard" and COEF_ERROR:
+    if COEF_ERROR:
         messages.append(COEF_ERROR)
     if history_error and history_error not in messages:
         messages.append(
@@ -1188,174 +879,15 @@ def update_predict(_tab, model):
         if messages
         else None
     )
-    label = "M2" if model == "m2" else "dashboard model"
     return (
         banner,
         prediction_table(history_preds),
         prediction_bar(
-            history_preds, f"Predicted bikes hired, 1–7 January 2026 ({label})"
+            history_preds, "Predicted bikes hired, 1–7 January 2026"
         ),
         prediction_table(forecast_preds),
-        prediction_bar(forecast_preds, f"Predicted bikes hired, next five days ({label})"),
+        prediction_bar(forecast_preds, "Predicted bikes hired, next five days"),
     )
-
-
-@app.callback(
-    Output("compare-kpis", "children"),
-    Output("compare-note", "children"),
-    Output("compare-fit-fig", "figure"),
-    Output("compare-aic-fig", "figure"),
-    Output("compare-coef-fig", "figure"),
-    Output("compare-table", "children"),
-    Input("compare-source", "value"),
-)
-def update_compare(source):
-    if COMPARE_ERROR:
-        note = html.Div(COMPARE_ERROR, className="banner banner--error")
-        return [], note, EMPTY_FIG, EMPTY_FIG, EMPTY_FIG, None
-
-    fit = FIT_ALL.copy()
-    coefs = COEF_ALL.copy()
-    if source in {"A", "B"}:
-        fit = fit[fit["source"] == source]
-        coefs = coefs[coefs["source"] == source]
-
-    if fit.empty:
-        return [], html.Div("No comparison data."), EMPTY_FIG, EMPTY_FIG, EMPTY_FIG, None
-
-    best_r2 = fit.sort_values("adj_r2", ascending=False).iloc[0]
-    best_aic = fit.dropna(subset=["aic"]).sort_values("aic").iloc[0]
-    best_se = fit.sort_values("residual_se").iloc[0]
-
-    kpis = [
-        kpi_card(
-            "trophy",
-            best_r2["model_label"].split("·")[0].strip(),
-            "Highest adjusted R²",
-            f"{best_r2['source_label']}: {best_r2['adj_r2']:.2f}",
-        ),
-        kpi_card(
-            "arrow-trend-down",
-            best_aic["model_label"].split("·")[0].strip(),
-            "Lowest AIC",
-            f"{best_aic['source_label']}: {best_aic['aic']:,.0f}",
-        ),
-        kpi_card(
-            "bullseye",
-            best_se["model_label"].split("·")[0].strip(),
-            "Lowest residual SE",
-            f"{best_se['source_label']}: {best_se['residual_se']:,.0f} hires",
-        ),
-        kpi_card(
-            "database",
-            f"{int(fit['n'].dropna().iloc[0]):,}" if fit["n"].notna().any() else "—",
-            "Sample size",
-            "Same N across nested models",
-        ),
-    ]
-
-    note = html.Div(
-        [
-            fa("lightbulb"),
-            f" Best in-sample description in this view is {best_aic['model_label']} "
-            f"from {best_aic['source_label']} (AIC {best_aic['aic']:,.0f}, "
-            f"adj. R² {best_aic['adj_r2']:.2f}). Table A’s M2 leans on month and "
-            "pressure terms; Table B’s M2 adds year dummies. M4 in both files "
-            "uses season, daylight and a post-2023 shift. The dashboard model is "
-            "kept small (temp, humidity, weekday) so it can score live weather.",
-        ]
-    )
-
-    plot_fit = fit.copy()
-    if DASHBOARD_FIT and source == "both":
-        plot_fit = pd.concat([plot_fit, pd.DataFrame([DASHBOARD_FIT])], ignore_index=True)
-
-    r2_fig = px.bar(
-        plot_fit.sort_values("adj_r2"),
-        x="adj_r2",
-        y="model_label",
-        color="source_label",
-        orientation="h",
-        barmode="group",
-        color_discrete_map={
-            "Table A · model_coff2": PALETTE["A"],
-            "Table B · model_coff3": PALETTE["B"],
-            "Dashboard model": PALETTE["dashboard"],
-        },
-        labels={"adj_r2": "Adjusted R²", "model_label": "Model", "source_label": ""},
-    )
-    r2_fig.update_traces(hovertemplate="%{y}<br>Adj. R² = %{x:.3f}<extra>%{fullData.name}</extra>")
-    r2_fig = style_figure(r2_fig, "In-sample adjusted R²")
-
-    aic_df = fit.dropna(subset=["aic"])
-    aic_fig = px.bar(
-        aic_df.sort_values("aic", ascending=False),
-        x="aic",
-        y="model_label",
-        color="source_label",
-        orientation="h",
-        barmode="group",
-        color_discrete_map={
-            "Table A · model_coff2": PALETTE["A"],
-            "Table B · model_coff3": PALETTE["B"],
-        },
-        labels={"aic": "AIC (lower is better)", "model_label": "Model", "source_label": ""},
-    )
-    aic_fig.update_traces(hovertemplate="%{y}<br>AIC = %{x:,.0f}<extra>%{fullData.name}</extra>")
-    aic_fig = style_figure(aic_fig, "AIC — lower is a better in-sample fit")
-
-    focus = coefs[coefs["term"].isin(COEF_FOCUS)].copy()
-    if focus.empty:
-        coef_fig = EMPTY_FIG
-    else:
-        coef_fig = px.bar(
-            focus,
-            x="coefficient",
-            y="term",
-            color="model_label",
-            facet_col="source_label" if source == "both" else None,
-            orientation="h",
-            barmode="group",
-            labels={
-                "coefficient": "Coefficient (hires per unit)",
-                "term": "Weather term",
-                "model_label": "Model",
-            },
-        )
-        coef_fig.update_traces(
-            hovertemplate="%{y}: %{x:,.1f}<extra>%{fullData.name}</extra>"
-        )
-        coef_fig = style_figure(
-            coef_fig, "Weather coefficients across nested models"
-        )
-        coef_fig.for_each_annotation(lambda a: a.update(text=a.text.split("=")[-1]))
-
-    table_df = fit[
-        ["source_label", "model_label", "adj_r2", "r2", "aic", "residual_se", "n"]
-    ].copy()
-    table_df = table_df.rename(
-        columns={
-            "source_label": "Table",
-            "model_label": "Model",
-            "adj_r2": "Adj. R²",
-            "r2": "R² (rounded)",
-            "aic": "AIC",
-            "residual_se": "Residual SE",
-            "n": "N",
-        }
-    )
-    for col in ["Adj. R²", "R² (rounded)"]:
-        table_df[col] = table_df[col].round(3)
-    table_df["AIC"] = table_df["AIC"].round(0)
-    table_df["Residual SE"] = table_df["Residual SE"].round(0)
-    table_df["N"] = table_df["N"].round(0)
-    table = dash_table.DataTable(
-        data=table_df.to_dict("records"),
-        columns=[{"name": c, "id": c} for c in table_df.columns],
-        sort_action="native",
-        **TABLE_STYLE,
-    )
-    return kpis, note, r2_fig, aic_fig, coef_fig, table
 
 
 app.index_string = """
@@ -1482,16 +1014,6 @@ app.index_string = """
             .point-detail { min-height: 24px; margin: 4px 0 8px; color: #3d4a54; }
             .point-detail-inner .fa-solid { margin-right: 6px; color: #2e86ab; }
             .muted { color: #7a8790; }
-            .compare-note {
-                background: #eef6fb;
-                border-left: 4px solid #2e86ab;
-                padding: 12px 14px;
-                border-radius: 0 8px 8px 0;
-                color: #1b365d;
-                line-height: 1.5;
-                margin-bottom: 12px;
-            }
-            .compare-note .fa-solid { margin-right: 8px; }
         </style>
     </head>
     <body>
