@@ -12,11 +12,13 @@ API key. This module has two functions, both returning the same tidy shape:
 Both return a pandas DataFrame with one row per day and the columns:
 
     date, day_of_week, temp, humidity, precip, windspeed, cloudcover,
-    solarradiation, visibility, sealevelpressure
+    solarradiation, visibility, sealevelpressure, uvindex, daylight,
+    precipcover
 
 Temperature is in degrees Celsius, wind in km/h, precipitation in mm, humidity
 and cloud cover in percent, solar radiation in W/m² (24-hour mean), visibility
-in km, and pressure in hPa.
+in km, pressure in hPa, UV index as a daily maximum, daylight in hours, and
+precip cover as the percent of the day with rain.
 
 The forecast reaches about 7 days ahead. For any date in the past (for example
 the first week of January 2026) use open_meteo_history, which reads Open-Meteo's
@@ -50,6 +52,13 @@ CORE_HOURLY_FIELDS = {
     "precipitation": "precip",
     "wind_speed_10m": "windspeed",
     "cloud_cover": "cloudcover",
+}
+
+# Daily Open-Meteo field -> model column
+DAILY_FIELDS = {
+    "uv_index_max": "uvindex",
+    "daylight_duration": "daylight",
+    "precipitation_hours": "precipitation_hours",
 }
 
 
@@ -94,23 +103,42 @@ def _hourly_to_daily(hourly):
     return daily
 
 
-def _fetch_hourly(url, extra_params, timeout):
-    """Request the full hourly set; retry with core fields if extras are rejected."""
+def _attach_daily_fields(daily, payload):
+    """Add UV, daylight hours, and precip-cover from the daily Open-Meteo block."""
+    extra = payload.get("daily") or {}
+    if not extra.get("time"):
+        return daily
+    extras = pd.DataFrame({"date": pd.to_datetime(extra["time"]).normalize()})
+    if extra.get("uv_index_max") is not None:
+        extras["uvindex"] = extra["uv_index_max"]
+    if extra.get("daylight_duration") is not None:
+        extras["daylight"] = pd.to_numeric(extra["daylight_duration"], errors="coerce") / 3600.0
+    if extra.get("precipitation_hours") is not None:
+        extras["precipcover"] = (
+            pd.to_numeric(extra["precipitation_hours"], errors="coerce") / 24.0 * 100.0
+        )
+    return daily.merge(extras, on="date", how="left")
+
+
+def _fetch_payload(url, extra_params, timeout):
+    """Request hourly plus daily fields; retry with core hourly if extras fail."""
     params = {
         **extra_params,
         "hourly": ",".join(HOURLY_FIELDS),
+        "daily": ",".join(DAILY_FIELDS),
         "timezone": "auto",
         "wind_speed_unit": "kmh",
     }
     resp = requests.get(url, params=params, timeout=timeout)
     if resp.status_code >= 400:
         params["hourly"] = ",".join(CORE_HOURLY_FIELDS)
+        params.pop("daily", None)
         resp = requests.get(url, params=params, timeout=timeout)
     resp.raise_for_status()
     payload = resp.json()
     if "hourly" not in payload:
         raise ValueError("Open-Meteo response did not include hourly weather.")
-    return payload["hourly"]
+    return payload
 
 
 def open_meteo(location="London", days_to_forecast=5):
@@ -122,12 +150,12 @@ def open_meteo(location="London", days_to_forecast=5):
         )
 
     lat, lon, label = geocode(location)
-    hourly = _fetch_hourly(
+    payload = _fetch_payload(
         FORECAST_URL,
         {"latitude": lat, "longitude": lon, "forecast_days": days_to_forecast},
         timeout=15,
     )
-    daily = _hourly_to_daily(hourly)
+    daily = _attach_daily_fields(_hourly_to_daily(payload["hourly"]), payload)
     daily.attrs["location"] = label
     return daily
 
@@ -135,7 +163,7 @@ def open_meteo(location="London", days_to_forecast=5):
 def open_meteo_history(location, start_date, end_date):
     """Return daily weather for a past date range from Open-Meteo's archive."""
     lat, lon, label = geocode(location)
-    hourly = _fetch_hourly(
+    payload = _fetch_payload(
         ARCHIVE_URL,
         {
             "latitude": lat,
@@ -145,7 +173,7 @@ def open_meteo_history(location, start_date, end_date):
         },
         timeout=30,
     )
-    daily = _hourly_to_daily(hourly)
+    daily = _attach_daily_fields(_hourly_to_daily(payload["hourly"]), payload)
     daily.attrs["location"] = label
     return daily
 

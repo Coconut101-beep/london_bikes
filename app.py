@@ -146,9 +146,14 @@ MODEL_EQUATIONS = html.Div(
                 equation_card(
                     "rocket",
                     "Dashboard model",
-                    "Simpler alternative",
-                    "Intercept + 813.11 × temperature + (−203.57) × humidity + a weekday effect",
-                    "Intercept = 33,530.  Weekday (Mon = 0): Tue +2,382 · Wed +2,389 · Thu +2,385 · Fri +788 · Sat −1,394 · Sun −3,691. Kept as a simpler alternative on Predict.",
+                    "Used on Predict",
+                    (
+                        "Intercept + 562.36 × temperature + (−183.65) × precipitation + "
+                        "105.53 × visibility + (−149.15) × wind speed + (−39.73) × precip cover + "
+                        "80.89 × sea-level pressure + 886.21 × UV index + 335.62 × daylight + "
+                        "a weekday effect + a season effect + a post-2023 shift"
+                    ),
+                    "Intercept = −64,093. Monday and Autumn are the baselines. post_2023 = −4,788 from 2023 onward.",
                 ),
                 equation_card(
                     "layer-group",
@@ -165,7 +170,7 @@ MODEL_EQUATIONS = html.Div(
                 equation_card(
                     "layer-group",
                     "Table B · M2 Weekday + extras",
-                    "Used on Predict · adj. R² 0.69",
+                    "model_coff3 · adj. R² 0.69",
                     (
                         "Intercept + 589.4 × temperature + (−211.8) × precipitation + "
                         "(−107.8) × humidity + (−192.2) × wind speed + (−10.7) × cloud cover + "
@@ -230,6 +235,10 @@ def load_bikes():
             )
         if "year" in bike.columns:
             bike["year"] = pd.to_numeric(bike["year"], errors="coerce")
+        if "daylight" not in bike.columns and {"sunrise", "sunset"} <= set(bike.columns):
+            sunrise = pd.to_datetime(bike["sunrise"], utc=True, errors="coerce")
+            sunset = pd.to_datetime(bike["sunset"], utc=True, errors="coerce")
+            bike["daylight"] = (sunset - sunrise).dt.total_seconds() / 3600.0
         bike["date_label"] = bike["date"].dt.strftime("%Y-%m-%d")
         return bike, None
     except Exception as exc:
@@ -313,16 +322,47 @@ TRAINING_MEANS = {
     "solarradiation": 109.9,
     "visibility": 22.8,
     "sealevelpressure": 1015.0,
+    "uvindex": 4.2,
+    "daylight": 12.1,
+    "precipcover": 9.1,
 }
 
 
+def season_from_month(month: int) -> str:
+    if month in (12, 1, 2):
+        return "Winter"
+    if month in (3, 4, 5):
+        return "Spring"
+    if month in (6, 7, 8):
+        return "Summer"
+    return "Autumn"
+
+
+def add_model_dummies(df: pd.DataFrame) -> pd.DataFrame:
+    """Add season_* and post_2023 columns used by model_coefficients.csv."""
+    out = df.copy()
+    if "season_name" not in out.columns and "month" in out.columns:
+        out["season_name"] = out["month"].map(season_from_month)
+    if "season_name" in out.columns:
+        for season in SEASON_ORDER:
+            out[f"season_{season}"] = (
+                out["season_name"].astype(str) == season
+            ).astype(float)
+    if "year" in out.columns:
+        out["post_2023"] = (pd.to_numeric(out["year"], errors="coerce") >= 2023).astype(
+            float
+        )
+    return out
+
+
 def enrich_calendar(weather: pd.DataFrame) -> pd.DataFrame:
-    """Add month/year fields and fill M2 extras Open-Meteo may omit."""
+    """Add calendar dummies and fill extras Open-Meteo may omit."""
     out = weather.copy()
     dates = pd.to_datetime(out["date"])
     out["year"] = dates.dt.year.astype(int)
     out["month"] = dates.dt.month.astype(int)
     out["month_name"] = dates.dt.strftime("%b")
+    out = add_model_dummies(out)
     for col, mean in TRAINING_MEANS.items():
         if col not in out.columns:
             out[col] = mean
@@ -393,7 +433,19 @@ def dashboard_in_sample(bike, intercept, numeric_coefs, day_coefs):
     df = bike.copy()
     if "date" in df.columns:
         df = df[df["date"] >= pd.Timestamp("2014-01-01", tz="UTC")]
-    needed = ["bikes_hired", "day_of_week", *numeric_coefs.keys()]
+    if "month" in df.columns:
+        df["month"] = pd.to_numeric(df["month"], errors="coerce")
+    df = add_model_dummies(df)
+    dummy_or_id = [
+        c
+        for c in numeric_coefs
+        if c.startswith("season_") or c == "post_2023"
+    ]
+    needed = [
+        "bikes_hired",
+        "day_of_week",
+        *[c for c in numeric_coefs if c not in dummy_or_id],
+    ]
     df = df.dropna(subset=[c for c in needed if c in df.columns])
     if df.empty:
         return None
@@ -411,7 +463,7 @@ def dashboard_in_sample(bike, intercept, numeric_coefs, day_coefs):
         "source": "dashboard",
         "source_label": "Dashboard model",
         "model": "dashboard",
-        "model_label": "Deployed (temp + humidity + weekday)",
+        "model_label": "Deployed (season + daylight)",
         "r2": r2,
         "adj_r2": r2,
         "aic": np.nan,
@@ -496,6 +548,10 @@ def prediction_table(df: pd.DataFrame):
         "cloudcover",
         "solarradiation",
         "visibility",
+        "uvindex",
+        "daylight",
+        "precipcover",
+        "sealevelpressure",
     ]:
         if col in display.columns:
             display[col] = display[col].round(1)
@@ -504,12 +560,13 @@ def prediction_table(df: pd.DataFrame):
         {"name": "Date", "id": "date"},
         {"name": "Day", "id": "day_of_week"},
         {"name": "Temp (°C)", "id": "temp"},
-        {"name": "Humidity (%)", "id": "humidity"},
         {"name": "Precip (mm)", "id": "precip"},
         {"name": "Wind (km/h)", "id": "windspeed"},
-        {"name": "Cloud (%)", "id": "cloudcover"},
-        {"name": "Solar (W/m²)", "id": "solarradiation"},
         {"name": "Visibility (km)", "id": "visibility"},
+        {"name": "UV", "id": "uvindex"},
+        {"name": "Daylight (h)", "id": "daylight"},
+        {"name": "Precip cover (%)", "id": "precipcover"},
+        {"name": "Pressure (hPa)", "id": "sealevelpressure"},
         {"name": "Predicted hires", "id": "predicted_hires"},
     ]
     visible = [c["id"] for c in columns if c["id"] in display.columns]
@@ -589,7 +646,7 @@ def get_weather(kind: str):
     return _WEATHER_CACHE[kind]
 
 
-def weather_predictions(kind: str, model: str = "m2"):
+def weather_predictions(kind: str, model: str = "dashboard"):
     """Return (predictions_df, error_message) for history or forecast."""
     weather, error = get_weather(kind)
     if error:
@@ -799,11 +856,10 @@ app.layout = html.Div(
                             html.P(
                                 [
                                     fa("wand-magic-sparkles"),
-                                    " Predictions default to Table B’s M2 (weekday + year/month "
-                                    "weather model). Open-Meteo supplies temperature, humidity, "
-                                    "rain, wind, cloud, solar radiation and visibility; 2026 uses "
-                                    "the 2025 year effect because that dummy is the latest in the "
-                                    "fit. The simpler dashboard model remains available below.",
+                                    " Predictions default to the exported dashboard model in "
+                                    "`model_coefficients.csv` (weather, daylight, UV, season, "
+                                    "weekday, and a post-2023 shift). Open-Meteo supplies the "
+                                    "weather inputs. Table B’s M2 remains available below.",
                                 ],
                                 className="lede",
                             ),
@@ -814,15 +870,15 @@ app.layout = html.Div(
                                         id="predict-model",
                                         options=[
                                             {
+                                                "label": " Dashboard model (season + daylight)",
+                                                "value": "dashboard",
+                                            },
+                                            {
                                                 "label": " Table B · M2 (weekday + extras)",
                                                 "value": "m2",
                                             },
-                                            {
-                                                "label": " Dashboard model (temp + humidity + weekday)",
-                                                "value": "dashboard",
-                                            },
                                         ],
-                                        value="m2",
+                                        value="dashboard",
                                         inline=True,
                                         className="radio-row",
                                     ),
@@ -1104,7 +1160,7 @@ def update_point_detail(click_data, weather_var):
     Input("predict-model", "value"),
 )
 def update_predict(_tab, model):
-    model = model or "m2"
+    model = model or "dashboard"
     history_preds, history_error = weather_predictions("history", model)
     forecast_preds, forecast_error = weather_predictions("forecast", model)
 
